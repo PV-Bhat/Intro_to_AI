@@ -6,6 +6,7 @@ from tkinter import messagebox
 import random
 import copy
 import platform
+import math
 # --- Configuration & Constants ---
 
 # Colors (Gabriele Cirulli style)
@@ -33,6 +34,7 @@ FONT_SCORE_LABEL = ("Verdana", 12, "bold")
 FONT_SCORE_VAL = ("Verdana", 20, "bold")
 FONT_TILE = ("Clear Sans", 24, "bold")
 FONT_MSG = ("Helvetica", 12)
+FONT_RECOMMENDATION = ("Arial", 54, "bold")
 
 # Game States
 STATE_PLAYING = "STATE_PLAYING"
@@ -66,6 +68,7 @@ class Game2048GUI:
         # Initial setup
         self.init_game()
         self.update_board_ui()
+        self.update_recommendation_display()
 
     def _setup_ui(self):
         # Main Container
@@ -109,6 +112,21 @@ class Game2048GUI:
         self.score_label.pack(anchor="w")
 
         # Slot 2: Messages
+        ai_frame = tk.Frame(self.right_frame, bg=COLORS['bg'])
+        ai_frame.pack(fill="x", pady=(0, 10))
+        tk.Label(ai_frame, text="RECOMMENDED MOVE", bg=COLORS['bg'], fg=COLORS['text_dark'], font=FONT_SCORE_LABEL).pack(anchor="w")
+
+        self.recommendation_var = tk.StringVar(value="")
+        self.recommendation_label = tk.Label(
+            ai_frame,
+            textvariable=self.recommendation_var,
+            bg=COLORS['bg'],
+            fg="#f65e3b",
+            font=FONT_RECOMMENDATION
+        )
+        self.recommendation_label.pack(anchor="center")
+
+        # Slot 3: Messages
         msg_frame = tk.Frame(self.right_frame, bg=COLORS['grid_bg'], padx=10, pady=10)
         msg_frame.pack(fill="x", pady=0)
         
@@ -168,6 +186,8 @@ class Game2048GUI:
         if self.current_state == STATE_PLAYING:
             if key in ["Up", "Down", "Left", "Right"]:
                 self.perform_game_move(key)
+            elif key.lower() == "a":
+                self.perform_ai_move()
             elif (event.state & 0x0004) and (key.lower() == 'z'): # Ctrl+Z
                 self.undo_move()
             elif key == "Undo": 
@@ -208,10 +228,12 @@ class Game2048GUI:
             # Spawn new tile
             self.spawn_tile()
             self.update_board_ui()
+            self.update_recommendation_display()
             
             # Check game over
             if self.is_game_over():
                 self.msg_label.config(text="Game Over!\n\nNo more moves possible.\nPress Ctrl+Z to undo or restart.")
+                self.recommendation_var.set("✖")
         else:
             # Invalid move (nothing changed)
             pass
@@ -222,9 +244,144 @@ class Game2048GUI:
             self.undo_stack = None # Clear stack (one level undo)
             self.update_board_ui()
             self.update_score_display()
+            self.update_recommendation_display()
             self.msg_label.config(text="Move undone.\nUse arrow keys to move.\nCtrl+Z to undo.")
         else:
             print("Nothing to undo")
+
+    def perform_ai_move(self):
+        best_move = self.get_best_move(depth=3)
+        if not best_move:
+            self.recommendation_var.set("✖")
+            self.msg_label.config(text="No valid AI move available.")
+            return
+
+        self.recommendation_var.set(self.move_to_arrow(best_move))
+
+        self.perform_game_move(best_move)
+        if self.current_state == STATE_PLAYING:
+            self.msg_label.config(text=f"AI played: {best_move}\nPress A for next AI move.")
+
+    def move_to_arrow(self, move_name):
+        arrows = {
+            "Up": "↑",
+            "Down": "↓",
+            "Left": "←",
+            "Right": "→",
+        }
+        return arrows.get(move_name, move_name)
+
+    def update_recommendation_display(self):
+        best_move = self.get_best_move(depth=3)
+        if best_move:
+            self.recommendation_var.set(self.move_to_arrow(best_move))
+        else:
+            self.recommendation_var.set("✖")
+
+    def get_best_move(self, depth=3):
+        moves = [
+            ("Up", -1, 0),
+            ("Down", 1, 0),
+            ("Left", 0, -1),
+            ("Right", 0, 1),
+        ]
+
+        best_move = None
+        best_value = -math.inf
+
+        for move_name, dr, dc in moves:
+            moved, next_board, score_gain = self.logic_move(self.board, dr, dc)
+            if not moved:
+                continue
+
+            value = score_gain + self.expectimax(next_board, depth - 1, is_chance=True)
+            if value > best_value:
+                best_value = value
+                best_move = move_name
+
+        return best_move
+
+    def expectimax(self, board, depth, is_chance):
+        if depth <= 0:
+            return self.evaluate_board(board)
+
+        if is_chance:
+            empty_cells = [(r, c) for r in range(4) for c in range(4) if board[r][c] == 0]
+            if not empty_cells:
+                return self.evaluate_board(board)
+
+            probability_per_cell = 1.0 / len(empty_cells)
+            expected_value = 0.0
+
+            for r, c in empty_cells:
+                board_2 = copy.deepcopy(board)
+                board_2[r][c] = 2
+                board_4 = copy.deepcopy(board)
+                board_4[r][c] = 4
+
+                value_2 = self.expectimax(board_2, depth - 1, is_chance=False)
+                value_4 = self.expectimax(board_4, depth - 1, is_chance=False)
+
+                expected_value += probability_per_cell * (0.9 * value_2 + 0.1 * value_4)
+
+            return expected_value
+
+        best_value = -math.inf
+        has_valid_move = False
+
+        for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            moved, next_board, score_gain = self.logic_move(board, dr, dc)
+            if not moved:
+                continue
+
+            has_valid_move = True
+            value = score_gain + self.expectimax(next_board, depth - 1, is_chance=True)
+            best_value = max(best_value, value)
+
+        return best_value if has_valid_move else self.evaluate_board(board)
+
+    def evaluate_board(self, board):
+        empty_cells = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
+        max_tile = max(max(row) for row in board)
+
+        smoothness = 0
+        for r in range(4):
+            for c in range(4):
+                if board[r][c] == 0:
+                    continue
+                current_log = math.log2(board[r][c])
+
+                if c + 1 < 4 and board[r][c + 1] != 0:
+                    smoothness -= abs(current_log - math.log2(board[r][c + 1]))
+                if r + 1 < 4 and board[r + 1][c] != 0:
+                    smoothness -= abs(current_log - math.log2(board[r + 1][c]))
+
+        monotonicity = 0
+        for row in board:
+            left_to_right = 0
+            right_to_left = 0
+            for i in range(3):
+                a = math.log2(row[i]) if row[i] else 0
+                b = math.log2(row[i + 1]) if row[i + 1] else 0
+                if a > b:
+                    left_to_right += b - a
+                else:
+                    right_to_left += a - b
+            monotonicity += max(left_to_right, right_to_left)
+
+        for c in range(4):
+            up_to_down = 0
+            down_to_up = 0
+            for r in range(3):
+                a = math.log2(board[r][c]) if board[r][c] else 0
+                b = math.log2(board[r + 1][c]) if board[r + 1][c] else 0
+                if a > b:
+                    up_to_down += b - a
+                else:
+                    down_to_up += a - b
+            monotonicity += max(up_to_down, down_to_up)
+
+        return (empty_cells * 250) + (max_tile * 1.0) + (smoothness * 3.0) + (monotonicity * 2.0)
 
     def logic_move(self, board, dr, dc):
         """
